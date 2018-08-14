@@ -3,39 +3,50 @@
 /*
  BiFold relay control with Autoconnect and MQTT controls
  for capacitive switched bifolding doors
-
 */
 #include <FS.h>
 #include <ArduinoJson.h>    
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
 #include <EEPROM.h>
+#include <AceButton.h>
+using namespace ace_button;
+#include <AdjustableButtonConfig.h>
+#include <ButtonConfig.h>
 #include <Atm_esp8266.h>
 #include <DNSServer.h>
 #include <ESP8266WebServer.h>
 #include <WiFiManager.h>  
-
-// Update these with values suitable for your network.
-
+//-----------------------------------------------------------------------------------
+// WiFI network values
+//-----------------------------------------------------------------------------------
 const char* ssid = "MonkeyRanch";
 const char* password = "12345678";
 const char* mqtt_server = "192.168.10.62";
-
 WiFiClient espClient;
 PubSubClient client(espClient);
+//-----------------------------------------------------------------------------------
 long lastMsg = 0;
 char msg[50];
 int value = 0;
-unsigned long  BEACON_DELAY = 2000;
-unsigned long  INTERVAL_DURATION = 500;
-unsigned long RELAY_FIRED;
-unsigned long ONLINE_START;
+unsigned long   BEACON_DELAY = 2000;
+unsigned long   INTERVAL_DURATION = 500;
+unsigned long   RELAY_FIRED;
+unsigned long   ONLINE_START;
+unsigned long   TOP_RANGE;
+const int BUTTON_PIN = D0;
+
+
 Atm_led led;
 Atm_timer timer;
 int DOOR_STATE = 0;
 int LAST_STATE = 0;
 int LAST_COMMAND = 0;
+bool STARTUP= false;
 
+AceButton button(BUTTON_PIN);
+AdjustableButtonConfig adjustableButtonConfig;
+void handleEvent(AceButton*, uint8_t, uint8_t);
 
 //flag for saving data
 bool shouldSaveConfig = false;
@@ -48,7 +59,7 @@ bool shouldSaveConfig = false;
 #define mqtt_pass    ""
 #define outTopic =   "STATUS"
 #define inTopic =    "TEST"
-
+#define USE_PULSED_RELAY
 #define TOKEN "mnwc5ijPmSaiyTejTpji"
 //====================================================================================================
 
@@ -57,6 +68,8 @@ void saveConfigCallback () {
   Serial.println("Should save config");
   shouldSaveConfig = true;
 }
+
+
 
 void setup() {
   pinMode(BUILTIN_LED, OUTPUT);     // Initialize the BUILTIN_LED pin as an output
@@ -67,14 +80,16 @@ void setup() {
   setup_wifi();
   client.setServer(mqtt_server, 1883);
   client.setCallback(callback);
-  //--------------PINS-------------------------------
-  pinMode(D0,INPUT_PULLUP);
+ //--------------PINS-------------------------------
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(D5,OUTPUT);
   pinMode(D6,OUTPUT);
   pinMode(D7,OUTPUT);
   digitalWrite(D5,HIGH);
   digitalWrite(D6,HIGH);
   digitalWrite(D7,LOW);
+
+ 
   //-------------------------------------------------
   EEPROM.begin(512); 
   LAST_STATE = EEPROM.read(0);
@@ -83,6 +98,20 @@ void setup() {
   Serial.println(LAST_STATE);
   Serial.print("LAST_COMMAND=");
   Serial.println(LAST_COMMAND);
+  
+ // Override the System ButtonConfig with our own AdjustableButtonConfig
+  // instance instead.
+  button.setButtonConfig(&adjustableButtonConfig);
+
+ // Configure the ButtonConfig with the event handler and enable LongPress.
+ // SupressAfterLongPress is optional since we don't do anything if we get it.
+  adjustableButtonConfig.setEventHandler(handleEvent);
+  adjustableButtonConfig.setFeature(ButtonConfig::kFeatureLongPress);
+  adjustableButtonConfig.setLongPressDelay(2000);
+ 
+  void handleEvent(AceButton*, uint8_t, uint8_t);
+
+
   
 
    if (SPIFFS.begin()) {
@@ -219,11 +248,9 @@ led.trigger(led.EVT_BLINK);
 
 ONLINE_START = millis();
 
+
 }
 
-void timer_callback(){
-  digitalWrite(D7,HIGH);
-}
 void setup_wifi() {
 
   delay(10);
@@ -244,7 +271,9 @@ void setup_wifi() {
   Serial.println("IP address: ");
   Serial.println(WiFi.localIP());
 }
-
+//---------------------------------------------------------------------------------------------------------------
+// MQTT Callback logic
+//---------------------------------------------------------------------------------------------------------------
 void callback(char* topic, byte* payload, unsigned int length) {
   Serial.print("Message arrived [");
   Serial.print(topic);
@@ -252,19 +281,32 @@ void callback(char* topic, byte* payload, unsigned int length) {
   for (int i = 0; i < length; i++) {
     Serial.print((char)payload[i]);
   }
+  
   Serial.println();
 
-  // Switch on the LED if an 1 was received as first character
   if ((char)payload[0] == '1') {
-    digitalWrite(BUILTIN_LED, LOW);   // Turn the LED on (Note that LOW is the voltage level
-    // but actually the LED is on; this is because
-    // it is acive low on the ESP-01)
-  } else {
-    digitalWrite(BUILTIN_LED, HIGH);  // Turn the LED off by making the voltage HIGH
+   
+    DOOR_STATE=1;
+    LAST_STATE=2;
+    Serial.println("DOOR STATE = 1");
+    Serial.println(LAST_STATE);
+    Serial.println("MQTT_OPEN");
+   //client.publish("outTopic", "BiDOOR-OPEN");
+   
+      
+  } 
+  if ((char)payload[0] == '2') {
+
+    DOOR_STATE=2;
+    LAST_STATE=1;
+    Serial.println("DOOR STATE = 2");
+    Serial.println(LAST_STATE);
+    Serial.println("MQTT_CLOSE");
+    
   }
 
 }
-
+//--------------------------------------------------------------------------------------------------------------
 void reconnect() {
   // Loop until we're reconnected
   while (!client.connected()) {
@@ -291,23 +333,25 @@ void loop() {
     reconnect();
   }
   client.loop();
-
-  OnSwitchChanged();
+  button.check();
+  //OnSwitchChanged();
   OnStateChanged();
   
-  automaton.run();
+ 
     
   long now = millis();
+  
   if (now - RELAY_FIRED > INTERVAL_DURATION) {
       digitalWrite(D5,HIGH);
       digitalWrite(D6,HIGH);
   }
   if (now - ONLINE_START > 3000) {
       digitalWrite(D7,HIGH);
+      STARTUP=false;
   }
   
   //snprintf (msg, 75, "door state=%ld", DOOR_STATE);
-  
+   automaton.run();
 }
 
 //-------------------------------------------------------------------------------------------------------------------
@@ -321,22 +365,28 @@ void OnSwitchChanged()
     LAST_COMMAND=1;
     EEPROM.write(1,LAST_COMMAND);
     EEPROM.commit();
-    Serial.println("OPEN_COMMAND");
-    client.publish("outTopic", "BiDOOR-OPEN");
+    Serial.println("SWITCH_OPEN");
+
   }
   
   if(DOOR_STATE==1 && digitalRead(D0)==LOW){
     DOOR_STATE=2;
-    LAST_COMMAND=1;
-    Serial.println("CLOSED_COMMAND");
+    LAST_COMMAND=2;
+    Serial.println("SWITCH_CLOSE");
     EEPROM.write(1,LAST_COMMAND);
     EEPROM.commit();
   }
 }
 
+void OnSwitchStateChanged(){
+  
+}
+
 void OnStateChanged()
 {
-  if(DOOR_STATE==1 && LAST_STATE!=1){
+  
+  
+  if(DOOR_STATE==1 && LAST_STATE==2){
       digitalWrite(D5,LOW);
       RELAY_FIRED = millis();
       Serial.println("HIGH");
@@ -344,14 +394,40 @@ void OnStateChanged()
       EEPROM.write(1,LAST_STATE);
       EEPROM.commit();
     }
-  if(DOOR_STATE==2 && LAST_STATE != 2){
+  if(DOOR_STATE==2 && LAST_STATE==1){
       digitalWrite(D6,LOW);
       RELAY_FIRED = millis();
       Serial.println("LOW");
       LAST_STATE=2;
-
       EEPROM.write(1,LAST_STATE);
       EEPROM.commit();
     }
+  
 }
 
+void handleEvent(AceButton* /* button */, uint8_t eventType,
+    uint8_t /* buttonState */) {
+  switch (eventType) {
+
+    case AceButton::kEventPressed:
+   
+      if(DOOR_STATE==1){
+        DOOR_STATE=2;
+        LAST_STATE=1;     
+        Serial.print("Door State=");
+        Serial.println(DOOR_STATE);
+      }else{
+        DOOR_STATE=1;
+        LAST_STATE=2;
+        Serial.print("Door State=");
+        Serial.println(DOOR_STATE);        
+      }
+ 
+      break;
+      
+    
+  }
+}
+
+
+//---------------------------------------------------------------------------------------------------------
