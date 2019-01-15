@@ -1,8 +1,10 @@
 
 
 /*
- BiFold relay control with Autoconnect and MQTT controls
- for capacitive switched bifolding doors
+Design Synthesis- r.young
+BiFold relay control with Autoconnect and MQTT controls
+for bifolding doors [linear control with limits]
+capacitive switch
 */
 #include <FS.h>
 #include <ArduinoJson.h>    
